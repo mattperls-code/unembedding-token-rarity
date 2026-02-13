@@ -1,4 +1,4 @@
-# Unembedding Document Frequency
+# Unembedding Token Rarity
 
 Uncovering connections between LLM token representations and semantic rarity.
 
