@@ -12,13 +12,14 @@ from sklearn.linear_model import Ridge
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import r2_score
 import matplotlib.pyplot as plt
+import matplotlib.patches as patches
 import textwrap
 
 experiment_doc_count = 1000000
 experiment_query_count = 1000000
 
 training_split = 0.8
-ridge_alpha = 100000
+ridge_alpha = 2
 
 output_path = "./results"
 
@@ -72,6 +73,12 @@ def compute_embeddings(token_ids, model):
         "Key Matrix Embeddings": kmat_embeddings.numpy()
     }
 
+def compute_regression(training_x, training_y):
+    regression = Ridge(alpha=ridge_alpha)
+    regression.fit(training_x, training_y)
+
+    return regression
+
 def predict_inverse_scores_from_embeddings(token_set_name, vocab_size, inverse_scores, embeddings):
     results = { token_set_name: {} }
 
@@ -84,13 +91,12 @@ def predict_inverse_scores_from_embeddings(token_set_name, vocab_size, inverse_s
 
         for embedding_key, embedding_value in embeddings.items():
             training_x = scaler.fit_transform(embedding_value[:training_samples, :])
-            validation_x = scaler.fit_transform(embedding_value[training_samples:, :])
+            validation_x = scaler.transform(embedding_value[training_samples:, :])
 
             training_y = score_value[:training_samples, :]
             validation_y = score_value[training_samples:, :]
 
-            regression = Ridge(alpha=ridge_alpha)
-            regression.fit(training_x, training_y)
+            regression = compute_regression(training_x, training_y)
 
             training_y_pred = regression.predict(training_x)
             validation_y_pred = regression.predict(validation_x)
@@ -137,6 +143,111 @@ def plot(output_file, title, feature_names, feature_values):
 
     plt.tight_layout()
     plt.savefig(f"{output_path}/{output_file}")
+    plt.close()
+
+def plot_results(results):
+    pool_keys = [ "Doc Terms", "Query Terms", "Collection Terms" ]
+    score_keys = [ "Inverse Document Frequency", "Inverse Document Occurrences", "Inverse Query Frequency", "Inverse Query Occurrences", "Inverse Collection Frequency", "Inverse Collection Occurrences", "Random Noise" ]
+    embedding_keys = [ "Input Embeddings", "Query Matrix Embeddings", "Key Matrix Embeddings" ]
+    split_keys = [ "Training", "Validation" ]
+
+    # ex: docTerms/idf/training -> input
+    for pool_key in pool_keys:
+        for score_key in score_keys:
+            for split_key in split_keys:
+                os.makedirs(f"{output_path}/{pool_key}/{score_key}", exist_ok=True)
+
+                plot(f"{pool_key}/{score_key}/{split_key}.png", f"Predicting {score_key} from Word Embeddings of {pool_key}", embedding_keys, [
+                    results[pool_key][score_key][embedding_key][split_key] for embedding_key in embedding_keys
+                ])
+
+    # ex: queryTerms/input/validation -> idf
+    for pool_key in pool_keys:
+        for embedding_key in embedding_keys:
+            for split_key in split_keys:
+                os.makedirs(f"{output_path}/{pool_key}/{embedding_key}", exist_ok=True)
+
+                plot(f"{pool_key}/{embedding_key}/{split_key}.png", f"Predicting Rarity Features from {embedding_key} of {pool_key}", score_keys, [
+                    results[pool_key][score_key][embedding_key][split_key] for score_key in score_keys
+                ])
+
+    # ex: input/igo/train -> docTerms
+    for embedding_key in embedding_keys:
+        for score_key in score_keys:
+            for split_key in split_keys:
+                os.makedirs(f"{output_path}/{embedding_key}/{score_key}", exist_ok=True)
+
+                plot(f"{embedding_key}/{score_key}/{split_key}.png", f"Predicting {score_key} from {embedding_key}", pool_keys, [
+                    results[pool_key][score_key][embedding_key][split_key] for pool_key in pool_keys
+                ])
+
+def visualize_score_map(output_file, text, tokenizer, compute_scores, compute_score_predictions):
+    tokens = tokenizer(text, return_offsets_mapping=True)
+
+    scores = compute_scores(tokens["input_ids"])
+    score_predictions = compute_score_predictions(tokens["input_ids"])
+
+    plt.clf()
+
+    fig, ax = plt.subplots()
+
+    x = 0
+    
+    for token_index in range(len(tokens["input_ids"])):
+        token_text = text[tokens["offset_mapping"][token_index][0]:tokens["offset_mapping"][token_index][1]]
+        
+        if token_text == "": continue
+        
+        text_obj = ax.text(x, 8.15, token_text, fontsize=18, va="bottom", ha='left')
+        
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        
+        bbox_pixels = text_obj.get_window_extent(renderer=renderer)
+        x_pixels = ax.transData.transform([(x, 0)])[0][0]
+        pixel_width = bbox_pixels.width
+        x_end_pixels = x_pixels + pixel_width
+        x_start_data = ax.transData.inverted().transform([(x_pixels, 0)])[0][0]
+        x_end_data = ax.transData.inverted().transform([(x_end_pixels, 0)])[0][0]
+        width = x_end_data - x_start_data
+        
+        token_score = round(scores[token_index], 3)
+        normalized_token_score = max(min(token_score, 10.0), 0.0) / 10.0
+        score_color = (normalized_token_score, 0.0, 0.0)
+        ax.add_patch(patches.Rectangle(
+            (x, 4),
+            width,
+            3.5,
+            linewidth=0,
+            facecolor=score_color
+        ))
+        
+        token_score_prediction = round(float(score_predictions[token_index]), 3)
+        normalized_token_score_prediction = max(min(token_score_prediction, 10.0), 0.0) / 10.0
+        score_prediction_color = (0.0, 0.0, normalized_token_score_prediction)
+        ax.add_patch(patches.Rectangle(
+            (x, 0),
+            width,
+            3.5,
+            linewidth=0,
+            facecolor=score_prediction_color
+        ))
+        
+        x += width
+        
+    fig.canvas.draw()
+    current_fig_width = fig.get_figwidth()
+    current_xlim = ax.get_xlim()
+    coefficient = current_fig_width / (current_xlim[1] - current_xlim[0])
+
+    fig.set_size_inches(x * coefficient, 2)
+
+    ax.set_xlim(0, x)
+    ax.set_ylim(0, 10)
+    ax.axis("off")
+
+    plt.savefig(f"{output_path}/{output_file}", dpi=100, bbox_inches="tight")
+
     plt.close()
 
 def main():
@@ -209,41 +320,30 @@ def main():
 
     results = doc_term_results | query_term_results | collection_term_results
 
-    # plot results
+    plot_results(results)
 
-    pool_keys = [ "Doc Terms", "Query Terms", "Collection Terms" ]
-    score_keys = [ "Inverse Document Frequency", "Inverse Document Occurrences", "Inverse Query Frequency", "Inverse Query Occurrences", "Inverse Collection Frequency", "Inverse Collection Occurrences", "Random Noise" ]
-    embedding_keys = [ "Input Embeddings", "Query Matrix Embeddings", "Key Matrix Embeddings" ]
-    split_keys = [ "Training", "Validation" ]
+    icf_scaler = StandardScaler()
+    icf_regression = compute_regression(
+        icf_scaler.fit_transform(collection_term_embeddings["Input Embeddings"]),
+        collection_term_inverse_scores["Inverse Collection Frequency"]
+    )
 
-    # ex: docTerms/idf/training -> input
-    for pool_key in pool_keys:
-        for score_key in score_keys:
-            for split_key in split_keys:
-                os.makedirs(f"{output_path}/{pool_key}/{score_key}", exist_ok=True)
+    visualization_examples = [
+        "Hello my name is Matt and I'm a programmer with an interest in computer science.",
+        "Recently I've been working on mechanistic interpretability of neural reranking models.",
+        "I wonder how well my ridge regression can predict the rarity of different tokens from their embeddings.",
+        "A good way to see is by comparing features of tokens with esoteric latent space compositions."
+    ]
 
-                plot(f"{pool_key}/{score_key}/{split_key}.png", f"Predicting {score_key} from Word Embeddings of {pool_key}", embedding_keys, [
-                    results[pool_key][score_key][embedding_key][split_key] for embedding_key in embedding_keys
-                ])
+    os.makedirs(f"{output_path}/Visualizations", exist_ok=True)
 
-    # ex: queryTerms/input/validation -> idf
-    for pool_key in pool_keys:
-        for embedding_key in embedding_keys:
-            for split_key in split_keys:
-                os.makedirs(f"{output_path}/{pool_key}/{embedding_key}", exist_ok=True)
-
-                plot(f"{pool_key}/{embedding_key}/{split_key}.png", f"Predicting Rarity Features from {embedding_key} of {pool_key}", score_keys, [
-                    results[pool_key][score_key][embedding_key][split_key] for score_key in score_keys
-                ])
-
-    # ex: input/igo/train -> docTerms
-    for embedding_key in embedding_keys:
-        for score_key in score_keys:
-            for split_key in split_keys:
-                os.makedirs(f"{output_path}/{embedding_key}/{score_key}", exist_ok=True)
-
-                plot(f"{embedding_key}/{score_key}/{split_key}.png", f"Predicting {score_key} from {embedding_key}", pool_keys, [
-                    results[pool_key][score_key][embedding_key][split_key] for pool_key in pool_keys
-                ])
+    for index, visualization_example in enumerate(visualization_examples, start=1):
+        visualize_score_map(
+            f"Visualizations/Example{index}.png",
+            visualization_example,
+            tokenizer,
+            lambda token_ids: [ math.log(collection_sample_count / (collection_frequency_table.get(token_id, 0) + 1)) for token_id in token_ids ],
+            lambda token_ids: icf_regression.predict(icf_scaler.transform(model.model.embed_tokens(torch.tensor(token_ids))))
+        )
 
 if __name__ == "__main__": main()
