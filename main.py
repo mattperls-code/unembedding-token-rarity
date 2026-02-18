@@ -15,11 +15,11 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import textwrap
 
-experiment_doc_count = 1000000
-experiment_query_count = 1000000
+experiment_doc_count = 5000000
+experiment_query_count = 5000000
 
 training_split = 0.8
-ridge_alpha = 2
+ridge_alpha = 0
 
 output_path = "./results"
 
